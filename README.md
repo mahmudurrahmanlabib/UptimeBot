@@ -66,7 +66,7 @@ Slack  ──(Socket Mode)──►  app.py
                               └── kuma_client.py the ONLY thing that calls Kuma
                                        │
                                        ▼
-                               Uptime Kuma  (uptime.mahmudurlabib.com)
+                               Uptime Kuma  (uptime.example.com)
 ```
 
 - **Socket Mode** means the bot connects out to Slack — you don't need to expose
@@ -127,7 +127,7 @@ an env file.
 cp .env.example .env
 # then edit .env and fill in the four required values:
 #   SLACK_BOT_TOKEN, SLACK_APP_TOKEN, KUMA_USERNAME, KUMA_PASSWORD
-# KUMA_URL is already set to https://uptime.mahmudurlabib.com
+# KUMA_URL is already set to https://uptime.example.com
 ```
 
 Everything else has sensible defaults. See the comments in `.env.example`.
