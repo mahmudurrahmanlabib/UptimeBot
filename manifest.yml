@@ -1,0 +1,42 @@
+display_information:
+  name: UptimeBot
+  description: Add, track, and auto-clean up Uptime Kuma website monitors right from Slack.
+  background_color: "#1f2d3d"
+
+features:
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: UptimeBot
+    always_online: true
+  slash_commands:
+    - command: /monitor
+      description: Add a site to monitor (e.g. /monitor example.com), or run a command
+      usage_hint: example.com
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read   # see @UptimeBot mentions in channels
+      - chat:write          # post messages
+      - chat:write.public   # post in public channels without being invited
+      - commands            # the /uptime slash command
+      - im:history          # read DMs sent to the bot
+      - im:read             # detect DM channels
+      - im:write            # open/post DMs
+      - users:read          # resolve display names for nicer messages
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_home_opened
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: true        # required for the Add-a-site modal and buttons
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

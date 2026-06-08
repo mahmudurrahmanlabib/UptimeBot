@@ -1,0 +1,11 @@
+services:
+  uptimebot:
+    build: .
+    container_name: uptimebot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - uptimebot-data:/data
+
+volumes:
+  uptimebot-data:
