@@ -49,6 +49,15 @@ def looks_like_url(u):
     return bool(re.match(r"^https?://[^\s/.]+\.[^\s]+", u or "", re.I))
 
 
+def clean_identifier(s):
+    """Normalise a user-typed site reference for matching: unwrap Slack links
+    (<http://x|x>), drop the scheme and any trailing slash. Plain names pass
+    through unchanged so `remove Acme App` still works."""
+    s = clean_slack_url(s or "")
+    s = re.sub(r"^https?://", "", s, flags=re.I)
+    return s.rstrip("/").strip()
+
+
 def derive_name(url):
     """A sensible default monitor name: the hostname."""
     try:

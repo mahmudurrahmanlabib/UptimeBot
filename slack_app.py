@@ -275,7 +275,7 @@ def cmd_status(args, ctx):
             line += f" · {others}"
         return simple(line + "\nUse `status <name>` for one site, or `list` to see all.")
 
-    identifier = " ".join(args)
+    identifier = utils.clean_identifier(" ".join(args))
     matches = db.find_sites(identifier)
     if not matches:
         return simple(f"I couldn't find a site matching “{identifier}”.")
@@ -301,7 +301,7 @@ def cmd_status(args, ctx):
 def cmd_remove(args, ctx):
     if not args:
         return simple("Usage: *remove <name or url>*")
-    identifier = " ".join(args)
+    identifier = utils.clean_identifier(" ".join(args))
     matches = db.find_sites(identifier)
     if not matches:
         return simple(f"I couldn't find a site matching “{identifier}”.")
@@ -329,9 +329,9 @@ def cmd_extend(args, ctx):
     days = config.CLIENT_TTL_DAYS
     if args[-1].isdigit():
         days = int(args[-1])
-        identifier = " ".join(args[:-1])
+        identifier = utils.clean_identifier(" ".join(args[:-1]))
     else:
-        identifier = " ".join(args)
+        identifier = utils.clean_identifier(" ".join(args))
     if not identifier:
         return simple("Usage: *extend <name or url> [days]*")
 
@@ -357,7 +357,7 @@ def cmd_set(args, ctx):
     new_type = utils.normalize_type(args[-1])
     if not new_type:
         return simple(f"“{args[-1]}” isn't a valid type. Use `permanent`, `prod`, `staging`, `demo`, or `client`.")
-    identifier = " ".join(args[:-1])
+    identifier = utils.clean_identifier(" ".join(args[:-1]))
     matches = db.find_sites(identifier)
     if not matches:
         return simple(f"I couldn't find a site matching “{identifier}”.")
