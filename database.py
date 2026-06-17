@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 
 import config
+import utils
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sites (
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sites (
     warned_expiry INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sites_monitor ON sites(monitor_id);
+CREATE INDEX IF NOT EXISTS idx_sites_channel ON sites(channel_id);
 """
 
 
@@ -63,12 +65,21 @@ def add_site(monitor_id, name, url, site_type, added_by, added_by_name,
         return cur.lastrowid
 
 
-def list_sites(site_type=None):
-    q = "SELECT * FROM sites"
-    params = ()
+def list_sites(site_type=None, channel_id=None, added_by=None):
+    """Sites, optionally narrowed by type and/or owner (channel or adder)."""
+    clauses, params = [], []
     if site_type:
-        q += " WHERE site_type = ?"
-        params = (site_type,)
+        clauses.append("site_type = ?")
+        params.append(site_type)
+    if channel_id is not None:
+        clauses.append("channel_id = ?")
+        params.append(channel_id)
+    if added_by is not None:
+        clauses.append("added_by = ?")
+        params.append(added_by)
+    q = "SELECT * FROM sites"
+    if clauses:
+        q += " WHERE " + " AND ".join(clauses)
     q += " ORDER BY site_type, name COLLATE NOCASE"
     with _conn() as con:
         return [dict(r) for r in con.execute(q, params).fetchall()]
@@ -78,28 +89,51 @@ def all_sites():
     return list_sites()
 
 
+def find_duplicate(url, channel_id):
+    """An existing site in the same owner (channel/DM) that points at the same
+    place as `url`, comparing canonically (scheme/www/case/trailing slash are
+    ignored). Returns the row dict or None. Used to block duplicate adds."""
+    target = utils.canonical_url(url)
+    for s in list_sites(channel_id=channel_id):
+        if utils.canonical_url(s["url"]) == target:
+            return s
+    return None
+
+
 def get_by_rowid(rowid):
     with _conn() as con:
         r = con.execute("SELECT * FROM sites WHERE id = ?", (rowid,)).fetchone()
         return dict(r) if r else None
 
 
-def find_sites(identifier):
-    """Match by exact url, exact name (case-insensitive), or substring of either."""
+def find_sites(identifier, channel_id=None, added_by=None):
+    """Match by exact url, exact name (case-insensitive), or substring of either.
+
+    When `channel_id` or `added_by` is given, the search is limited to that
+    owner's sites — so a user can only manage sites they can actually see.
+    """
     ident = (identifier or "").strip()
     like = f"%{ident}%"
+    clauses = ["""(url = ? COLLATE NOCASE
+                   OR name = ? COLLATE NOCASE
+                   OR url LIKE ? COLLATE NOCASE
+                   OR name LIKE ? COLLATE NOCASE)"""]
+    params = [ident, ident, like, like]
+    if channel_id is not None:
+        clauses.append("channel_id = ?")
+        params.append(channel_id)
+    if added_by is not None:
+        clauses.append("added_by = ?")
+        params.append(added_by)
+    params += [ident, ident]
     with _conn() as con:
         rows = con.execute(
-            """SELECT * FROM sites
-               WHERE url = ? COLLATE NOCASE
-                  OR name = ? COLLATE NOCASE
-                  OR url LIKE ? COLLATE NOCASE
-                  OR name LIKE ? COLLATE NOCASE
-               ORDER BY
+            "SELECT * FROM sites WHERE " + " AND ".join(clauses) +
+            """ ORDER BY
                   CASE WHEN url = ? COLLATE NOCASE OR name = ? COLLATE NOCASE
                        THEN 0 ELSE 1 END,
                   name COLLATE NOCASE""",
-            (ident, ident, like, like, ident, ident),
+            params,
         ).fetchall()
     return [dict(r) for r in rows]
 

@@ -80,6 +80,14 @@ def make_ctx(client, user_id, channel_id, is_dm):
     }
 
 
+def _scope(ctx):
+    """Limit lists and lookups to what the caller can see: this channel's sites
+    when used in a channel, or the caller's own sites when used in a DM."""
+    if ctx["is_dm"]:
+        return {"added_by": ctx["user_id"]}
+    return {"channel_id": ctx["channel_id"]}
+
+
 # Display order + emoji/label for each site type (used by `list` and the Home tab).
 TYPE_ORDER = ("permanent", "prod", "staging", "demo", "client")
 TYPE_META = {
@@ -202,7 +210,23 @@ def cmd_add(args, ctx):
     return _do_add(url, name, site_type, ctx)
 
 
+def _already_monitoring(s):
+    line = (f":eyes: You're already monitoring *{s['name']}* — <{s['url']}>  ·  "
+            f"{utils.status_emoji(s['last_status'])} {s['last_status']}.\n"
+            f"Manage it with `status {s['name']}`, `extend {s['name']}`, "
+            f"or `remove {s['name']}`.")
+    if s.get("added_by_name"):
+        line += f"\n_Added by {s['added_by_name']}._"
+    return simple(line)
+
+
 def _do_add(url, name, site_type, ctx):
+    # Don't add the same site twice for the same owner (this channel, or this
+    # user's DM). Different channels/people may still watch the same URL.
+    dup = db.find_duplicate(url, ctx["channel_id"])
+    if dup:
+        return _already_monitoring(dup)
+
     monitor_name = f"{site_type.upper()} | {name}"
     expires_at = None
     if site_type in config.EXPIRING_TYPES:
@@ -214,11 +238,22 @@ def _do_add(url, name, site_type, ctx):
     except KumaError as exc:
         return simple(f":warning: Couldn't add the monitor.\n```{exc}```")
 
-    db.add_site(
-        monitor_id=monitor_id, name=name, url=url, site_type=site_type,
-        added_by=ctx["user_id"], added_by_name=ctx["user_name"],
-        channel_id=ctx["channel_id"], is_dm=ctx["is_dm"], expires_at=expires_at,
-    )
+    try:
+        db.add_site(
+            monitor_id=monitor_id, name=name, url=url, site_type=site_type,
+            added_by=ctx["user_id"], added_by_name=ctx["user_name"],
+            channel_id=ctx["channel_id"], is_dm=ctx["is_dm"], expires_at=expires_at,
+        )
+    except Exception:
+        # The DB is our source of truth; if we couldn't record the site, don't
+        # leave an orphaned monitor behind in Kuma.
+        log.exception("DB insert failed after creating Kuma monitor %s; rolling back", monitor_id)
+        try:
+            with KumaClient() as kc:
+                kc.delete_monitor(monitor_id)
+        except Exception:
+            log.exception("couldn't roll back orphaned Kuma monitor %s", monitor_id)
+        return simple(":warning: Couldn't save the site just now — please try again.")
 
     if expires_at:
         when = utils.humanize(expires_at - time.time())
@@ -235,11 +270,13 @@ def _do_add(url, name, site_type, ctx):
 
 def cmd_list(args, ctx):
     flt = utils.normalize_type(args[0]) if args else None
-    sites = db.list_sites(flt)
+    sites = db.list_sites(flt, **_scope(ctx))
     if not sites:
-        msg = "No sites are being monitored yet. Add one with `monitor <url>`."
+        where = "here" if not ctx["is_dm"] else "yet"
+        msg = f"No sites are being monitored {where}. Add one with `monitor <url>`."
         if flt:
-            msg = f"No *{flt}* sites are being monitored yet."
+            scope = "in this channel" if not ctx["is_dm"] else "for you"
+            msg = f"No *{flt}* sites are being monitored {scope} yet."
         return simple(msg)
 
     blocks = [header("📊 Monitored sites")]
@@ -261,7 +298,7 @@ def cmd_list(args, ctx):
 
 def cmd_status(args, ctx):
     if not args:
-        sites = db.all_sites()
+        sites = db.list_sites(**_scope(ctx))
         if not sites:
             return simple("Nothing is being monitored yet. Add a site with `add <url> [type]`.")
         counts = {}
@@ -276,7 +313,7 @@ def cmd_status(args, ctx):
         return simple(line + "\nUse `status <name>` for one site, or `list` to see all.")
 
     identifier = utils.clean_identifier(" ".join(args))
-    matches = db.find_sites(identifier)
+    matches = db.find_sites(identifier, **_scope(ctx))
     if not matches:
         return simple(f"I couldn't find a site matching “{identifier}”.")
     if len(matches) > 1:
@@ -302,7 +339,7 @@ def cmd_remove(args, ctx):
     if not args:
         return simple("Usage: *remove <name or url>*")
     identifier = utils.clean_identifier(" ".join(args))
-    matches = db.find_sites(identifier)
+    matches = db.find_sites(identifier, **_scope(ctx))
     if not matches:
         return simple(f"I couldn't find a site matching “{identifier}”.")
     if len(matches) > 1:
@@ -335,7 +372,7 @@ def cmd_extend(args, ctx):
     if not identifier:
         return simple("Usage: *extend <name or url> [days]*")
 
-    matches = db.find_sites(identifier)
+    matches = db.find_sites(identifier, **_scope(ctx))
     if not matches:
         return simple(f"I couldn't find a site matching “{identifier}”.")
     if len(matches) > 1:
@@ -358,7 +395,7 @@ def cmd_set(args, ctx):
     if not new_type:
         return simple(f"“{args[-1]}” isn't a valid type. Use `permanent`, `prod`, `staging`, `demo`, or `client`.")
     identifier = utils.clean_identifier(" ".join(args[:-1]))
-    matches = db.find_sites(identifier)
+    matches = db.find_sites(identifier, **_scope(ctx))
     if not matches:
         return simple(f"I couldn't find a site matching “{identifier}”.")
     if len(matches) > 1:
@@ -402,7 +439,7 @@ def build_add_modal(channel_id, is_dm):
             {"type": "input", "block_id": "url",
              "label": {"type": "plain_text", "text": "URL"},
              "element": {"type": "plain_text_input", "action_id": "val",
-                         "placeholder": {"type": "plain_text", "text": "https://example.com"}}},
+                         "placeholder": {"type": "plain_text", "text": "example.com — https:// optional"}}},
             {"type": "input", "block_id": "type",
              "label": {"type": "plain_text", "text": "Type"},
              "element": {"type": "static_select", "action_id": "val",
@@ -425,19 +462,19 @@ def build_add_modal(channel_id, is_dm):
 # --------------------------------------------------------------------------- #
 # Home tab
 # --------------------------------------------------------------------------- #
-def _home_actions():
+def _home_actions(add_label="➕  Add a site"):
     return {"type": "actions", "elements": [
         {"type": "button", "style": "primary", "action_id": "home_add",
-         "text": {"type": "plain_text", "text": "➕  Add a site", "emoji": True}},
+         "text": {"type": "plain_text", "text": add_label, "emoji": True}},
         {"type": "button", "action_id": "home_refresh",
          "text": {"type": "plain_text", "text": "🔄  Refresh", "emoji": True}},
     ]}
 
 
 _HOME_INTRO = (
-    "*Uptime monitoring for your team's sites — right from Slack.*\n"
-    "I check each site continuously and post here the moment one goes down, "
-    "then again when it recovers."
+    "*Know the second a site goes down.*\n"
+    "I watch your sites around the clock and ping you here the moment one drops — "
+    "and again when it's back."
 )
 
 _HOME_COMMANDS = (
@@ -447,16 +484,17 @@ _HOME_COMMANDS = (
 )
 
 
-def build_home_view():
-    """Compose the App Home dashboard from the database (fast; no live Kuma call)."""
-    sites = db.all_sites()
+def build_home_view(sites):
+    """Compose the App Home dashboard from an already-filtered list of sites
+    (fast; no live Kuma call). The caller decides which sites the viewer sees."""
     blocks = [header("🤖  UptimeBot"), section(_HOME_INTRO)]
 
     if not sites:
         blocks += [
             {"type": "divider"},
-            section("*Get started*\nNothing is being monitored yet — add your first site:"),
-            _home_actions(),
+            section("*You're not watching any sites yet.*\n"
+                    "Add your first one and I'll alert you the moment it goes down."),
+            _home_actions("➕  Add your first site"),
             section(_HOME_COMMANDS),
         ]
         return {"type": "home", "blocks": blocks}
@@ -474,6 +512,15 @@ def build_home_view():
         _home_actions(),
         {"type": "divider"},
     ]
+
+    # Surface anything that's down right now, above the per-type breakdown.
+    down_sites = sorted((s for s in sites if s["last_status"] == "down"),
+                        key=lambda x: x["name"].lower())
+    if down_sites:
+        lines = [f"{utils.status_emoji('down')}  *{s['name']}*  —  <{s['url']}>"
+                 for s in down_sites]
+        blocks.append(section(":rotating_light:  *Needs attention*\n" + "\n".join(lines)))
+        blocks.append({"type": "divider"})
 
     for t in TYPE_ORDER:
         group = sorted((s for s in sites if s["site_type"] == t),
@@ -496,10 +543,49 @@ def build_home_view():
     blocks += [
         {"type": "divider"},
         section(_HOME_COMMANDS),
-        context_block(f"{STATUS_LEGEND}   ·   updated {time.strftime('%H:%M %Z')} · "
+        context_block(f"{STATUS_LEGEND}   ·   Showing sites you added or in your channels.   ·   "
+                      f"updated {time.strftime('%H:%M %Z')} · "
                       f"status refreshes every {config.STATUS_POLL_SECONDS}s"),
     ]
     return {"type": "home", "blocks": blocks}
+
+
+def _is_member(client, channel_id, user_id):
+    """Is `user_id` a member of `channel_id`? Fails closed (False) on any error
+    so the Home tab never leaks sites the viewer shouldn't see."""
+    if not channel_id:
+        return False
+    try:
+        cursor = None
+        while True:
+            resp = client.conversations_members(channel=channel_id, cursor=cursor, limit=200)
+            if user_id in resp.get("members", []):
+                return True
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+            if not cursor:
+                return False
+    except Exception:
+        log.debug("membership check failed for %s in %s", user_id, channel_id, exc_info=True)
+        return False
+
+
+def _visible_sites(client, user_id):
+    """Sites this user should see on Home: ones they added, plus sites added in
+    channels they belong to. Channel membership is looked up once per channel."""
+    visible = []
+    member_of = {}  # channel_id -> bool, memoised within this call
+    for s in db.all_sites():
+        if s["added_by"] == user_id:
+            visible.append(s)
+            continue
+        if s["is_dm"]:
+            continue  # someone else's DM site — never visible to others
+        cid = s["channel_id"]
+        if cid not in member_of:
+            member_of[cid] = _is_member(client, cid, user_id)
+        if member_of[cid]:
+            visible.append(s)
+    return visible
 
 
 def publish_home(client, user_id):
@@ -507,7 +593,8 @@ def publish_home(client, user_id):
     if not user_id:
         return
     try:
-        client.views_publish(user_id=user_id, view=build_home_view())
+        view = build_home_view(_visible_sites(client, user_id))
+        client.views_publish(user_id=user_id, view=view)
     except Exception:
         log.exception("couldn't publish Home tab for %s", user_id)
 
