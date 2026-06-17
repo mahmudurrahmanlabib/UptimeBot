@@ -249,6 +249,38 @@ Slack IDs (e.g. `ALLOWED_USER_IDS=U012ABC,U034DEF`).
 - **Slash command says "dispatch_failed"** — the bot process isn't running or
   lost its Socket Mode connection; check `docker compose logs -f`.
 
+## Maintenance
+
+### Start fresh (wipe everything)
+
+To clear **all** tracked sites for everyone and start clean, use `reset.py`. It
+deletes the monitors the bot created from Uptime Kuma **and** clears the bot's
+database. It's destructive and irreversible, so it runs as a **dry run** unless
+you pass `--yes`.
+
+```bash
+# Bare metal (with your .env in place):
+python reset.py                 # dry run — shows what would be deleted
+python reset.py --yes           # delete tracked Kuma monitors, then clear the DB
+python reset.py --yes --keep-kuma   # clear the DB only, leave Kuma monitors
+
+# Docker (run inside the service so it sees the same env + volume):
+docker compose run --rm uptimebot python reset.py --yes
+```
+
+Open Home tabs refresh on next open or **Refresh**. (Prefer `remove <name>` for
+deleting a single site — `reset.py` is the nuclear option.)
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+Tests cover URL/type parsing, the database (duplicate detection, owner scoping),
+and command routing — no Slack or Kuma connection required.
+
 ## Security notes
 
 - `.env` holds Slack tokens and Kuma credentials — never commit it (a
@@ -262,7 +294,10 @@ Slack IDs (e.g. `ALLOWED_USER_IDS=U012ABC,U034DEF`).
   (TCP, keyword, push, etc.) and per-monitor notification settings are managed
   in the Uptime Kuma UI.
 - The bot's database is the source of truth for type/expiry. If you delete a
-  monitor directly in Kuma, run `remove` (or `list`) so the bot stays in sync.
+  monitor directly in Kuma, a periodic **reconcile** job (every
+  `RECONCILE_POLL_SECONDS`, default 6h, plus once shortly after startup) notices
+  the monitor is gone, drops the stale entry, and tells the owning channel — so
+  you don't have to run `remove` yourself.
 - Status alerting is poll-based (default every 120s), so notifications can lag a
   live outage by up to that interval.
 

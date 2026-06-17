@@ -43,6 +43,8 @@ MONITOR_RETRIES = int(_get("MONITOR_RETRIES", default="2"))
 STATUS_POLL_SECONDS = int(_get("STATUS_POLL_SECONDS", default="120"))
 EXPIRY_POLL_SECONDS = int(_get("EXPIRY_POLL_SECONDS", default="3600"))
 EXPIRY_WARN_HOURS = int(_get("EXPIRY_WARN_HOURS", default="24"))
+# How often to reconcile our DB against Kuma (drop rows whose monitor is gone).
+RECONCILE_POLL_SECONDS = int(_get("RECONCILE_POLL_SECONDS", default="21600"))  # 6h
 
 # --- Optional access control (comma separated Slack IDs). Empty = allow all. ---
 ALLOWED_USER_IDS = _csv_set("ALLOWED_USER_IDS")

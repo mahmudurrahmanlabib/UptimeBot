@@ -143,6 +143,14 @@ def remove_site(rowid):
         con.execute("DELETE FROM sites WHERE id = ?", (rowid,))
 
 
+def clear_all():
+    """Delete every tracked site (keeps the schema and indexes). Returns the
+    number of rows removed. Used by the reset script for a fresh start."""
+    with _conn() as con:
+        cur = con.execute("DELETE FROM sites")
+        return cur.rowcount
+
+
 def set_status(rowid, status):
     with _conn() as con:
         con.execute("UPDATE sites SET last_status = ? WHERE id = ?", (status, rowid))

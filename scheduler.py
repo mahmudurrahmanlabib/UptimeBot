@@ -148,6 +148,43 @@ def _expiry_job(slack_client):
 
 
 # --------------------------------------------------------------------------- #
+# Reconciliation (heal drift between our DB and Kuma)
+# --------------------------------------------------------------------------- #
+def _reconcile_job(slack_client):
+    """Drop DB rows whose Kuma monitor no longer exists (e.g. deleted directly
+    in the Kuma UI), so we stop polling ghosts and the dashboard stays honest."""
+    sites = db.all_sites()
+    if not sites:
+        return
+    try:
+        with KumaClient() as kc:
+            live = kc.list_monitor_ids()
+    except KumaError as exc:
+        log.warning("reconcile skipped this cycle: %s", exc)
+        return
+
+    now = time.time()
+    untracked = len(live) - sum(1 for s in sites if s["monitor_id"] in live)
+    if untracked > 0:
+        # Monitors in Kuma we don't track (could be created outside the bot).
+        # Log only — we never delete monitors we didn't create.
+        log.info("reconcile: %d Kuma monitor(s) not tracked by UptimeBot", untracked)
+
+    for s in sites:
+        if s["monitor_id"] in live:
+            continue
+        if now - (s.get("created_at") or 0) < 120:
+            continue  # brand-new add; give Kuma a moment before judging it gone
+        db.remove_site(s["id"])
+        log.info("reconcile: dropped %s (monitor %s gone from Kuma)",
+                 s["name"], s["monitor_id"])
+        text = f"⚠️ Stopped tracking {s['name']}"
+        body = (f":warning: Stopped tracking *{s['name']}* (<{s['url']}>) — its monitor "
+                f"no longer exists in Uptime Kuma.\nRe-add it with `add {s['url']}`.")
+        _post(slack_client, s["channel_id"], text, [section(body)])
+
+
+# --------------------------------------------------------------------------- #
 # Wiring
 # --------------------------------------------------------------------------- #
 def start(slack_client):
@@ -166,16 +203,30 @@ def start(slack_client):
         args=[slack_client], id="expiry_sweep",
         max_instances=1, coalesce=True,
     )
-    # Run an expiry sweep shortly after boot so a restart doesn't leave expired
-    # client sites lingering until the first interval fires. Scheduled (not
-    # inline) so it never blocks startup if Kuma is briefly unreachable.
+    sched.add_job(
+        _safe(_reconcile_job), "interval",
+        seconds=max(300, config.RECONCILE_POLL_SECONDS),
+        args=[slack_client], id="reconcile",
+        max_instances=1, coalesce=True,
+    )
+    # Run an expiry sweep + a reconcile shortly after boot so a restart doesn't
+    # leave expired client sites lingering or keep polling monitors that were
+    # deleted in Kuma while we were down. Scheduled (not inline) so they never
+    # block startup if Kuma is briefly unreachable.
     sched.add_job(
         _safe(_expiry_job), "date",
         run_date=datetime.now(timezone.utc) + timedelta(seconds=10),
         args=[slack_client], id="expiry_boot",
     )
+    sched.add_job(
+        _safe(_reconcile_job), "date",
+        run_date=datetime.now(timezone.utc) + timedelta(seconds=15),
+        args=[slack_client], id="reconcile_boot",
+    )
 
     sched.start()
-    log.info("scheduler started: status poll every %ss, expiry sweep every %ss",
-             config.STATUS_POLL_SECONDS, config.EXPIRY_POLL_SECONDS)
+    log.info("scheduler started: status poll every %ss, expiry sweep every %ss, "
+             "reconcile every %ss",
+             config.STATUS_POLL_SECONDS, config.EXPIRY_POLL_SECONDS,
+             config.RECONCILE_POLL_SECONDS)
     return sched

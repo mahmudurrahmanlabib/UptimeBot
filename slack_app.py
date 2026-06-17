@@ -24,6 +24,14 @@ log = logging.getLogger("uptimebot.slack")
 
 _name_cache = {}
 
+# Short-lived channel-membership cache so opening/refreshing Home doesn't call
+# conversations.members on every open. Keyed by (channel_id, user_id).
+_MEMBER_TTL = 300  # seconds
+_member_cache = {}
+
+# Slack caps a published view at 100 blocks; stay safely under it.
+_MAX_HOME_BLOCKS = 95
+
 
 # --------------------------------------------------------------------------- #
 # Block Kit helpers
@@ -522,7 +530,13 @@ def build_home_view(sites):
         blocks.append(section(":rotating_light:  *Needs attention*\n" + "\n".join(lines)))
         blocks.append({"type": "divider"})
 
+    # Reserve room for the footer (divider + commands + context) and a possible
+    # "and more" note so a big workspace never blows past Slack's 100-block cap.
+    section_budget = _MAX_HOME_BLOCKS - 4
+    truncated = False
     for t in TYPE_ORDER:
+        if truncated:
+            break
         group = sorted((s for s in sites if s["site_type"] == t),
                        key=lambda x: x["name"].lower())
         if not group:
@@ -537,8 +551,14 @@ def build_home_view(sites):
         head = f"{emoji}  *{label}*  ·  {len(group)}"
         # Split into <=20-line sections to stay within Block Kit's per-section limit.
         for i in range(0, len(lines), 20):
+            if len(blocks) >= section_budget:
+                truncated = True
+                break
             text = (head + "\n" if i == 0 else "") + "\n".join(lines[i:i + 20])
             blocks.append(section(text))
+
+    if truncated:
+        blocks.append(context_block("…and more — use `list` to see everything."))
 
     blocks += [
         {"type": "divider"},
@@ -551,22 +571,31 @@ def build_home_view(sites):
 
 
 def _is_member(client, channel_id, user_id):
-    """Is `user_id` a member of `channel_id`? Fails closed (False) on any error
-    so the Home tab never leaks sites the viewer shouldn't see."""
+    """Is `user_id` a member of `channel_id`? Cached for `_MEMBER_TTL` seconds.
+    Fails closed (False) on any error so the Home tab never leaks sites the
+    viewer shouldn't see."""
     if not channel_id:
         return False
+    key = (channel_id, user_id)
+    cached = _member_cache.get(key)
+    if cached is not None and time.time() - cached[1] < _MEMBER_TTL:
+        return cached[0]
+    result = False
     try:
         cursor = None
         while True:
             resp = client.conversations_members(channel=channel_id, cursor=cursor, limit=200)
             if user_id in resp.get("members", []):
-                return True
+                result = True
+                break
             cursor = (resp.get("response_metadata") or {}).get("next_cursor")
             if not cursor:
-                return False
+                break
     except Exception:
         log.debug("membership check failed for %s in %s", user_id, channel_id, exc_info=True)
-        return False
+        return False  # don't cache transient failures
+    _member_cache[key] = (result, time.time())
+    return result
 
 
 def _visible_sites(client, user_id):
