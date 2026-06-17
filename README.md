@@ -102,7 +102,9 @@ to it or recreate it from the manifest. Either way:
    and save. (Creating a new app from a manifest works too.)
 2. **Install / Reinstall** the app to your workspace (OAuth & Permissions →
    *Install to Workspace*). Copy the **Bot User OAuth Token** — it starts with
-   `xoxb-`. → this is `SLACK_BOT_TOKEN`.
+   `xoxb-`. → this is `SLACK_BOT_TOKEN`. **Upgrading an existing install?** The
+   personal Home tab added the `channels:read` / `groups:read` scopes, so you
+   must re-apply the manifest and **reinstall** for it to work.
 3. **Basic Information → App-Level Tokens → Generate Token and Scopes.** Add the
    **`connections:write`** scope, generate it, and copy the token — it starts
    with `xapp-`. → this is `SLACK_APP_TOKEN`. (This is what enables Socket Mode.)
@@ -166,9 +168,16 @@ channel (`/invite @UptimeBot`) or just DM it.
 - **Slash command:** `/monitor example.com` adds a site (no `https://` needed);
   `/monitor` alone opens an "Add a site" form; `/monitor list` (etc.) runs any command.
 - **Home tab:** open UptimeBot in Slack and click **Home** for an at-a-glance
-  dashboard — counts of up/down, every site grouped by type with status dots, and
-  **Add a site** / **Refresh** buttons. Sites added from Home send their alerts to
-  your DM. (Status shown reflects the latest poll, every `STATUS_POLL_SECONDS`.)
+  dashboard — counts of up/down, a **Needs attention** list of anything currently
+  down, every site grouped by type with status dots, and **Add a site** /
+  **Refresh** buttons. Sites added from Home send their alerts to your DM.
+  (Status shown reflects the latest poll, every `STATUS_POLL_SECONDS`.)
+
+  The Home tab is **personal**: it shows only the sites *you* added plus sites
+  added in **channels you belong to** — not every site in the workspace.
+  Likewise, `list` in a channel shows that channel's sites, and `list` in a DM
+  shows your own. (This is why the bot needs the `channels:read` / `groups:read`
+  scopes; see step 1.)
 
 | Command | What it does |
 | --- | --- |
@@ -206,6 +215,15 @@ remove demo.acme.com
 Each site remembers the channel (or DM) it was added in. Up/down alerts and
 expiry notices for that site go *there* — so a channel only hears about the sites
 it cares about.
+
+### Duplicate sites
+
+Adding a site that's already monitored **by the same owner** (the same channel,
+or your DM) won't create a second monitor — the bot tells you it's already
+watching it and points you to `status` / `extend` / `remove`. URLs are matched
+loosely, so `example.com`, `https://www.example.com`, and `https://example.com/`
+all count as the same site. Different channels (or different people's DMs) can
+still each monitor the same URL for their own alerts.
 
 ### Access control (optional)
 

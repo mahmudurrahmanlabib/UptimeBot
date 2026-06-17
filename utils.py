@@ -49,6 +49,18 @@ def looks_like_url(u):
     return bool(re.match(r"^https?://[^\s/.]+\.[^\s]+", u or "", re.I))
 
 
+def canonical_url(u):
+    """A normalised key for duplicate detection only (not for storage).
+
+    Folds away the differences that mean "the same site": scheme, a leading
+    `www.`, letter case, and a trailing slash. So `example.com`,
+    `https://EXAMPLE.com/`, and `http://www.example.com` all collapse to
+    `example.com`.
+    """
+    u = normalize_url(u).lower().rstrip("/")
+    return re.sub(r"^https?://(www\.)?", "", u)
+
+
 def clean_identifier(s):
     """Normalise a user-typed site reference for matching: unwrap Slack links
     (<http://x|x>), drop the scheme and any trailing slash. Plain names pass

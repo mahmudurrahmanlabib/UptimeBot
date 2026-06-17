@@ -28,6 +28,8 @@ oauth_config:
       - im:read             # detect DM channels
       - im:write            # open/post DMs
       - users:read          # resolve display names for nicer messages
+      - channels:read       # check public-channel membership for the per-user Home tab
+      - groups:read         # same, for private channels
 
 settings:
   event_subscriptions:
