@@ -9,17 +9,29 @@ rest of the app is:
         monitor_id = kc.add_monitor(name, url)
         kc.delete_monitor(monitor_id)
         kc.rename_monitor(monitor_id, new_name)
-        info = kc.get_status(monitor_id)        # {'status': 'up', 'ping': 123}
+        info = kc.get_status(monitor_id)        # {'status': 'up', 'ping': 123, 'msg': '200 - OK'}
         ids  = kc.list_monitor_ids()            # {1, 2, 3}
 
-KumaClient opens a fresh connection per `with` block and logs in, which keeps it
-robust across threads (Slack handlers + the scheduler run on different threads).
+KumaClient opens a fresh connection per `with` block, which keeps it robust
+across threads (Slack handlers + the scheduler run on different threads). After
+the first password login it reuses Kuma's session token, so frequent connections
+don't trip Kuma's login rate limit or re-use a 2FA code (which Kuma rejects).
 """
 import logging
+import math
+import threading
 
 import config
 
 log = logging.getLogger("uptimebot.kuma")
+
+# Session token from the last password login, shared by every KumaClient.
+_token_lock = threading.Lock()
+_session_token = None
+
+# How much heartbeat history to read for a status check: enough to always
+# include the latest beat, rather than a whole day of beats per site per poll.
+_BEAT_WINDOW_HOURS = max(1, math.ceil(config.MONITOR_INTERVAL * 3 / 3600))
 
 try:
     from uptime_kuma_api import UptimeKumaApi, MonitorType
@@ -40,6 +52,15 @@ STATUS_MAP = {0: "down", 1: "up", 2: "pending", 3: "maintenance"}
 
 class KumaError(Exception):
     """Raised for any failure talking to Uptime Kuma, with a user-friendly message."""
+
+
+def _save_session(token, only_if=None):
+    """Remember (or with None, forget) the session token. `only_if` makes the
+    change conditional, so a stale failure can't wipe a newer token."""
+    global _session_token
+    with _token_lock:
+        if only_if is None or _session_token == only_if:
+            _session_token = token
 
 
 class KumaClient:
@@ -65,6 +86,9 @@ class KumaClient:
                 f"If your instance is Uptime Kuma v2.x, see README → 'Version compatibility'."
             ) from exc
 
+        if self._login_with_session():
+            return self
+
         token = ""
         if self.mfa_secret:
             if pyotp is None:
@@ -73,14 +97,37 @@ class KumaClient:
             token = pyotp.TOTP(self.mfa_secret).now()
 
         try:
-            self._api.login(self.username, self.password, token)
+            result = self._api.login(self.username, self.password, token)
         except Exception as exc:
             self._safe_disconnect()
             raise KumaError(
                 f"Uptime Kuma login failed for user '{self.username}': {exc}\n"
                 f"Check KUMA_USERNAME / KUMA_PASSWORD (and KUMA_MFA_SECRET if 2FA is on)."
             ) from exc
+        if isinstance(result, dict) and result.get("tokenRequired"):
+            # Kuma answers a 2FA account's password-only login without an error.
+            self._safe_disconnect()
+            raise KumaError(
+                f"Uptime Kuma user '{self.username}' has 2FA enabled. Set KUMA_MFA_SECRET to "
+                f"its TOTP secret, or use a dedicated bot account without 2FA."
+            )
+        _save_session(result.get("token") if isinstance(result, dict) else None)
         return self
+
+    def _login_with_session(self):
+        """Log in with the saved session token. False if there isn't one or Kuma
+        no longer accepts it (password changed, server secret rotated, …)."""
+        with _token_lock:
+            token = _session_token
+        if not token:
+            return False
+        try:
+            self._api.login_by_token(token)
+            return True
+        except Exception as exc:
+            log.info("saved Kuma session not accepted (%s); logging in with password", exc)
+            _save_session(None, only_if=token)
+            return False
 
     def __exit__(self, *exc):
         self._safe_disconnect()
@@ -124,17 +171,19 @@ class KumaClient:
             raise KumaError(f"Failed to rename monitor {monitor_id}: {exc}") from exc
 
     def get_status(self, monitor_id):
-        """Return {'status': <label>, 'ping': <ms or None>} from the latest heartbeat."""
+        """Return {'status': <label>, 'ping': <ms or None>, 'msg': <Kuma's reason>}
+        from the latest heartbeat."""
         try:
-            beats = self._api.get_monitor_beats(int(monitor_id), 24)
+            beats = self._api.get_monitor_beats(int(monitor_id), _BEAT_WINDOW_HOURS)
         except Exception as exc:
             raise KumaError(f"Failed to read status for monitor {monitor_id}: {exc}") from exc
         if not beats:
-            return {"status": "pending", "ping": None}
-        last = beats[-1]
+            return {"status": "pending", "ping": None, "msg": ""}
+        last = max(beats, key=lambda b: (str(b.get("time") or ""), b.get("id") or 0))
         return {
             "status": STATUS_MAP.get(last.get("status"), "pending"),
             "ping": last.get("ping"),
+            "msg": str(last.get("msg") or "").strip(),
         }
 
     def list_monitor_ids(self):

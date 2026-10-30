@@ -8,3 +8,6 @@ __pycache__/
 .git/
 .gitignore
 README.md
+tests/
+.pytest_cache/
+.DS_Store

@@ -17,19 +17,32 @@ CREATE TABLE IF NOT EXISTS sites (
     monitor_id    INTEGER NOT NULL,           -- the Uptime Kuma monitor id
     name          TEXT    NOT NULL,
     url           TEXT    NOT NULL,
-    site_type     TEXT    NOT NULL,           -- prod | staging | demo | client
+    site_type     TEXT    NOT NULL,           -- permanent | prod | staging | demo | client
     added_by      TEXT,                       -- Slack user id
     added_by_name TEXT,
     channel_id    TEXT,                        -- where notifications should go
-    is_dm         INTEGER DEFAULT 0,
+    is_dm         INTEGER DEFAULT 0,           -- 1 = personal: alerts go to added_by's DM
     created_at    REAL    NOT NULL,
     expires_at    REAL,                        -- NULL = permanent
     last_status   TEXT    DEFAULT 'pending',
-    warned_expiry INTEGER DEFAULT 0
+    warned_expiry INTEGER DEFAULT 0,
+    down_since    REAL,                        -- start of the current outage (NULL = none)
+    alert_channel TEXT,                        -- where that outage's DOWN alert was posted
+    alert_ts      TEXT                         -- its message ts, to thread the recovery
 );
 CREATE INDEX IF NOT EXISTS idx_sites_monitor ON sites(monitor_id);
 CREATE INDEX IF NOT EXISTS idx_sites_channel ON sites(channel_id);
+
+CREATE TABLE IF NOT EXISTS channel_settings (
+    channel_id TEXT PRIMARY KEY,
+    mention    TEXT,                           -- who DOWN alerts ping, e.g. <!here>
+    updated_by TEXT,
+    updated_at REAL
+);
 """
+
+# Columns added after the first release; older databases get them on startup.
+_ADDED_COLUMNS = {"down_since": "REAL", "alert_channel": "TEXT", "alert_ts": "TEXT"}
 
 
 @contextmanager
@@ -48,6 +61,16 @@ def _conn():
 def init_db():
     with _conn() as con:
         con.executescript(SCHEMA)
+        have = {r["name"] for r in con.execute("PRAGMA table_info(sites)")}
+        for col, col_type in _ADDED_COLUMNS.items():
+            if col in have:
+                continue
+            con.execute(f"ALTER TABLE sites ADD COLUMN {col} {col_type}")
+            if col == "down_since":
+                # Sites already down were alerted on before the upgrade; mark
+                # their outage open so they aren't announced a second time.
+                con.execute("UPDATE sites SET down_since = ? WHERE last_status = 'down'",
+                            (time.time(),))
 
 
 def add_site(monitor_id, name, url, site_type, added_by, added_by_name,
@@ -65,7 +88,7 @@ def add_site(monitor_id, name, url, site_type, added_by, added_by_name,
         return cur.lastrowid
 
 
-def list_sites(site_type=None, channel_id=None, added_by=None):
+def list_sites(site_type=None, channel_id=None, added_by=None, is_dm=None):
     """Sites, optionally narrowed by type and/or owner (channel or adder)."""
     clauses, params = [], []
     if site_type:
@@ -77,6 +100,9 @@ def list_sites(site_type=None, channel_id=None, added_by=None):
     if added_by is not None:
         clauses.append("added_by = ?")
         params.append(added_by)
+    if is_dm is not None:
+        clauses.append("is_dm = ?")
+        params.append(1 if is_dm else 0)
     q = "SELECT * FROM sites"
     if clauses:
         q += " WHERE " + " AND ".join(clauses)
@@ -89,12 +115,20 @@ def all_sites():
     return list_sites()
 
 
-def find_duplicate(url, channel_id):
-    """An existing site in the same owner (channel/DM) that points at the same
-    place as `url`, comparing canonically (scheme/www/case/trailing slash are
-    ignored). Returns the row dict or None. Used to block duplicate adds."""
+def find_duplicate(url, channel_id=None, added_by=None):
+    """An existing site with the same owner that points at the same place as
+    `url`, comparing canonically (scheme/www/case/trailing slash are ignored).
+
+    Pass `channel_id` to check a channel's sites, or `added_by` to check one
+    person's DM sites (stored under their DM or user id, so match on the adder).
+    Returns the row dict or None. Used to block duplicate adds.
+    """
     target = utils.canonical_url(url)
-    for s in list_sites(channel_id=channel_id):
+    if added_by is not None:
+        candidates = list_sites(added_by=added_by, is_dm=True)
+    else:
+        candidates = list_sites(channel_id=channel_id)
+    for s in candidates:
         if utils.canonical_url(s["url"]) == target:
             return s
     return None
@@ -156,6 +190,23 @@ def set_status(rowid, status):
         con.execute("UPDATE sites SET last_status = ? WHERE id = ?", (status, rowid))
 
 
+def open_outage(rowid, since, alert_channel=None, alert_ts=None):
+    """Record that a site went down, and where its DOWN alert was posted."""
+    with _conn() as con:
+        con.execute(
+            "UPDATE sites SET down_since = ?, alert_channel = ?, alert_ts = ? WHERE id = ?",
+            (since, alert_channel, alert_ts, rowid),
+        )
+
+
+def close_outage(rowid):
+    with _conn() as con:
+        con.execute(
+            "UPDATE sites SET down_since = NULL, alert_channel = NULL, alert_ts = NULL "
+            "WHERE id = ?", (rowid,),
+        )
+
+
 def set_expiry(rowid, expires_at):
     with _conn() as con:
         con.execute(
@@ -198,3 +249,29 @@ def get_expired(now):
             (now,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Per-channel settings
+# --------------------------------------------------------------------------- #
+def get_mention(channel_id):
+    """Who a channel's DOWN alerts ping (Slack markup), or "" for nobody."""
+    if not channel_id:
+        return ""
+    with _conn() as con:
+        r = con.execute("SELECT mention FROM channel_settings WHERE channel_id = ?",
+                        (channel_id,)).fetchone()
+    return (r["mention"] if r else "") or ""
+
+
+def set_mention(channel_id, mention, updated_by=None):
+    with _conn() as con:
+        con.execute(
+            """INSERT INTO channel_settings (channel_id, mention, updated_by, updated_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT(channel_id) DO UPDATE SET
+                 mention = excluded.mention,
+                 updated_by = excluded.updated_by,
+                 updated_at = excluded.updated_at""",
+            (channel_id, mention or "", updated_by, time.time()),
+        )

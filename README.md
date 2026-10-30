@@ -1,22 +1,45 @@
 # UptimeBot
 
 A simple Slack bot that lets your support and product teams add and manage
-[Uptime Kuma](https://github.com/louislam/uptime-kuma) monitors by chatting in
-Slack — in a channel or in a DM. It also handles **retention**: sites are kept
-until you remove them, while **client sites are auto-removed after a week**.
+[Uptime Kuma](https://github.com/louislam/uptime-kuma) monitors from **any Slack
+channel** (or a DM). It also handles **retention**: sites are kept until you
+remove them, while **client sites are auto-removed after a week**.
 
 ```
-You:        /monitor app.acme.com
-UptimeBot:  ✅ Now monitoring app.acme.com — type permanent
-            ♾️ Kept permanently — stays until you remove it.
+#ops   You:        /monitor app.acme.com
+       UptimeBot:  ✅ Now monitoring app.acme.com — type permanent · alerts post in #ops
 
-You:        /monitor client demo.acme.com
-UptimeBot:  ✅ Now monitoring demo.acme.com — type client
-            ⏳ As a client site it'll be auto-removed in 7d.
+#ops   You:        /monitor notify @here
+       UptimeBot:  🔔 Done — down alerts in this channel will ping @here.
+
+#ops   UptimeBot:  @here 🔴 app.acme.com is DOWN
+                   > Request failed with status code 503
+       (12 minutes later, in the alert's thread, also shown in the channel)
+       UptimeBot:  🟢 app.acme.com is back UP after 12m
 ```
 
-When a monitored site goes down (or recovers), UptimeBot posts an alert to the
-channel where that site was added.
+When a monitored site goes down, UptimeBot alerts the channel where that site was
+added. When it recovers, the alert is marked ✅ resolved with how long the site
+was down, and the recovery is posted in the alert's thread.
+
+## Add it to any channel in 10 seconds
+
+1. In the channel, type **`/monitor example.com`**. That's it — alerts for that
+   site now post in this channel. (Works in public channels even before you
+   invite the bot; it joins by itself.)
+2. **Private channel?** Invite it first: `/invite @UptimeBot`. If you forget,
+   it tells you instead of silently dropping alerts.
+3. Optional: **`/monitor notify @here`** so outages ping the channel (or
+   `@someone`, a user group like `@oncall`, or `off`).
+
+Other ways in, all of which let you pick the channel for alerts:
+
+- **Invite the bot** (`/invite @UptimeBot`) — it says hello with an **Add a site** button.
+- **`/monitor`** with nothing after it opens the **Add a site** form, preset to the current channel.
+- **⚡ Shortcuts:** *Monitor a website* (from the composer's shortcut menu) and
+  *Monitor this link* (from any message's ⋮ menu — the link is filled in for you).
+- **Home tab → Add a site** — choose any channel, or leave it empty to get alerts in your DM.
+- **Several at once:** `/monitor a.com b.com c.com`.
 
 ---
 
@@ -74,13 +97,16 @@ Slack  ──(Socket Mode)──►  app.py
 - **SQLite** is the source of truth for each site's *type*, *expiry*, and which
   Slack channel "owns" it (because Kuma can't track any of that). It's a single
   file; back it up if you care about history.
-- A background **scheduler** does two things:
-  - **Status alerts** — every couple of minutes it reads each site's live status
-    and, when a site flips between up and down, posts to the owning channel. This
-    per-channel routing is the reason the bot polls instead of using Kuma's own
-    (global) Slack notifications.
-  - **Expiry** — it warns ~24h before a client site expires, then deletes expired
-    client sites from both Kuma and the database and notifies the channel.
+- A background **scheduler** does three things:
+  - **Status alerts** — every couple of minutes it reads each site's live status.
+    The first *down* reading posts a DOWN alert (with Kuma's reason) to the owning
+    channel; the first *up* reading after that resolves it, however the status
+    wobbled in between. This per-channel routing is the reason the bot polls
+    instead of using Kuma's own (global) Slack notifications.
+  - **Expiry** — it warns ~24h before a client site expires (with **Extend** and
+    **Keep permanently** buttons), then deletes expired client sites from both
+    Kuma and the database and notifies the channel.
+  - **Reconcile** — it drops sites whose monitor was deleted directly in Kuma.
 
 ---
 
@@ -94,17 +120,16 @@ Slack  ──(Socket Mode)──►  app.py
 
 ## 1. Set up the Slack app
 
-You said the **UptimeBot** app already exists — you can either apply the manifest
-to it or recreate it from the manifest. Either way:
+Create the app from the manifest, or apply the manifest to an existing
+**UptimeBot** app:
 
-1. Go to <https://api.slack.com/apps> → your **UptimeBot** app
-   → **App Manifest**, paste the contents of [`manifest.yml`](./manifest.yml),
-   and save. (Creating a new app from a manifest works too.)
+1. Go to <https://api.slack.com/apps> → **Create New App → From a manifest**
+   (or open your existing app → **App Manifest**), paste the contents of
+   [`manifest.yml`](./manifest.yml), and save.
 2. **Install / Reinstall** the app to your workspace (OAuth & Permissions →
    *Install to Workspace*). Copy the **Bot User OAuth Token** — it starts with
-   `xoxb-`. → this is `SLACK_BOT_TOKEN`. **Upgrading an existing install?** The
-   personal Home tab added the `channels:read` / `groups:read` scopes, so you
-   must re-apply the manifest and **reinstall** for it to work.
+   `xoxb-`. → this is `SLACK_BOT_TOKEN`. **Upgrading an existing install?**
+   Re-apply the manifest and **reinstall** — see [Upgrading](#upgrading).
 3. **Basic Information → App-Level Tokens → Generate Token and Scopes.** Add the
    **`connections:write`** scope, generate it, and copy the token — it starts
    with `xapp-`. → this is `SLACK_APP_TOKEN`. (This is what enables Socket Mode.)
@@ -127,9 +152,8 @@ an env file.
 
 ```bash
 cp .env.example .env
-# then edit .env and fill in the four required values:
-#   SLACK_BOT_TOKEN, SLACK_APP_TOKEN, KUMA_USERNAME, KUMA_PASSWORD
-# KUMA_URL is already set to https://uptime.example.com
+# then edit .env and fill in the required values:
+#   SLACK_BOT_TOKEN, SLACK_APP_TOKEN, KUMA_URL, KUMA_USERNAME, KUMA_PASSWORD
 ```
 
 Everything else has sensible defaults. See the comments in `.env.example`.
@@ -156,22 +180,25 @@ echo 'DB_PATH=uptimebot.db' >> .env
 python app.py
 ```
 
-You should see `UptimeBot is starting (Socket Mode)…`. Invite the bot to a
-channel (`/invite @UptimeBot`) or just DM it.
+You should see `UptimeBot is starting (Socket Mode)…`. Then go to any channel and
+type `/monitor example.com` — or DM the bot a link.
 
 ---
 
 ## Using the bot
 
-- **In a channel:** `@UptimeBot <command>` — replies and alerts go to that channel.
-- **In a DM:** just type a command — or simply **paste a link** and it gets monitored.
-- **Slash command:** `/monitor example.com` adds a site (no `https://` needed);
-  `/monitor` alone opens an "Add a site" form; `/monitor list` (etc.) runs any command.
+- **Slash command (any channel or DM):** `/monitor example.com` adds a site (no
+  `https://` needed); `/monitor` alone opens the **Add a site** form;
+  `/monitor list` (etc.) runs any command. Adds and changes are announced in the
+  channel; lookups like `list` and `status` are shown only to you.
+- **In a channel the bot is in:** `@UptimeBot <command>` works too, and it answers
+  in the thread if you ask in one.
+- **In a DM:** just type a command — or simply **paste one or more links**.
 - **Home tab:** open UptimeBot in Slack and click **Home** for an at-a-glance
   dashboard — counts of up/down, a **Needs attention** list of anything currently
-  down, every site grouped by type with status dots, and **Add a site** /
-  **Refresh** buttons. Sites added from Home send their alerts to your DM.
-  (Status shown reflects the latest poll, every `STATUS_POLL_SECONDS`.)
+  down (and for how long), every site grouped by type with the channel its alerts
+  go to, and **Add a site** / **Refresh** buttons. (Status shown reflects the
+  latest poll, every `STATUS_POLL_SECONDS`.)
 
   The Home tab is **personal**: it shows only the sites *you* added plus sites
   added in **channels you belong to** — not every site in the workspace.
@@ -179,15 +206,19 @@ channel (`/invite @UptimeBot`) or just DM it.
   shows your own. (This is why the bot needs the `channels:read` / `groups:read`
   scopes; see step 1.)
 
+In a DM you can drop the `/monitor` prefix (e.g. just `list`).
+
 | Command | What it does |
 | --- | --- |
 | `/monitor <url> [type] [name]` | Start monitoring a site. `https://` is optional; type is optional (`permanent`, `prod`, `staging`, `demo`, `client`) and may go before or after the URL. No type → **permanent**. |
-| `list [type]` | Show monitored sites, grouped by type, with live status emoji. |
-| `status [name]` | Live status of one site, or an overall up/down summary. |
-| `extend <name> [days]` | Give a client site more time (default = the standard window). |
-| `set <name> <type>` | Re-classify a site, e.g. make a `client` site `permanent`, or a permanent one `client`. |
-| `remove <name>` | Stop monitoring (asks for confirmation, then deletes from Kuma). |
-| `help` | Show the command list. |
+| `/monitor <url> <url> … [type]` | Add up to 20 sites at once (names come from the domains). |
+| `/monitor list [type]` | Show monitored sites, grouped by type, with live status emoji. |
+| `/monitor status [name]` | Live status of one site (with Kuma's reason if it's down), or an overall summary. |
+| `/monitor extend <name> [days]` | Give a client site more time (default = the standard window). |
+| `/monitor set <name> <type>` | Re-classify a site, e.g. make a `client` site `permanent`, or a permanent one `client`. |
+| `/monitor remove <name>` | Stop monitoring (asks you privately to confirm, then deletes from Kuma and tells the channel). |
+| `/monitor notify <who>` | Who a channel's DOWN alerts ping: `@here`, `@channel`, people, user groups, or `off`. |
+| `/monitor help` | Show the command list. |
 
 **Examples**
 
@@ -195,11 +226,13 @@ channel (`/invite @UptimeBot`) or just DM it.
 /monitor app.acme.com
 /monitor client demo.acme.com
 /monitor staging stg.acme.com Acme Staging
-list client
-status Acme Staging
-extend demo.acme.com 14
-set demo.acme.com permanent
-remove demo.acme.com
+/monitor api.acme.com docs.acme.com status.acme.com
+/monitor notify @here
+/monitor list client
+/monitor status Acme Staging
+/monitor extend demo.acme.com 14
+/monitor set demo.acme.com permanent
+/monitor remove demo.acme.com
 ```
 
 ### Retention rules
@@ -207,14 +240,33 @@ remove demo.acme.com
 - **Default (no type), plus prod / staging / demo** → permanent. They stay until
   someone runs `remove`.
 - **client** → temporary. Auto-removed after `CLIENT_TTL_DAYS` (default **7**),
-  with a heads-up posted ~24h before. Use `extend` to add time or
-  `set <name> permanent` to keep it for good.
+  with a heads-up posted ~24h before that has **Extend** and **Keep permanently**
+  buttons. You can also use `extend` to add time or `set <name> permanent`.
 
 ### Where alerts go
 
-Each site remembers the channel (or DM) it was added in. Up/down alerts and
-expiry notices for that site go *there* — so a channel only hears about the sites
-it cares about.
+Each site has an owner: the channel it was added in (or the one picked in the
+form), or a person. Up/down alerts and expiry notices go *there*, so a channel
+only hears about the sites it cares about. Before adding a site, the bot checks
+it can actually post there:
+
+| Added in… | Alerts go to |
+| --- | --- |
+| A channel the bot is in | That channel. |
+| A public channel it isn't in yet | That channel — the bot joins it automatically. |
+| A private channel it isn't in | Nowhere yet: you're asked to `/invite @UptimeBot` first. Nothing is added. |
+| A DM with the bot, the Home tab, or the form with no channel picked | Your DM with the bot. |
+| A DM with someone else, or a group DM | Your DM with the bot (it can't post in those), and it tells you so. |
+
+If the bot later loses access to a channel (removed from a private channel,
+channel archived, posting restricted), alerts go to whoever added the site, with
+a note explaining why, instead of being lost.
+
+**Alert anatomy:** a DOWN alert includes Kuma's reason (e.g. `Request failed
+with status code 503`) and pings whoever `/monitor notify` set for the channel.
+When the site recovers, that same message changes to *✅ recovered — down for
+12m*, and a recovery note is posted in its thread and also shown in the
+channel. Recoveries never ping anyone. Times show in each reader's own timezone.
 
 ### Duplicate sites
 
@@ -229,7 +281,28 @@ still each monitor the same URL for their own alerts.
 
 Leave `ALLOWED_USER_IDS` / `ALLOWED_CHANNEL_IDS` empty to let anyone in your
 workspace use the bot. To restrict it, set either to a comma-separated list of
-Slack IDs (e.g. `ALLOWED_USER_IDS=U012ABC,U034DEF`).
+Slack IDs (e.g. `ALLOWED_USER_IDS=U012ABC,U034DEF`). The limits apply everywhere:
+commands, the form, shortcuts, the Home tab, and buttons. Buttons on a site
+(Remove, Extend, Keep) work only for people in the channel that owns it, or
+whoever added it.
+
+---
+
+## Upgrading
+
+Pull the new code and rebuild (`docker compose up -d --build`). The database
+updates itself on startup; sites that were already down won't alert a second time.
+
+Then, in your Slack app, **re-apply [`manifest.yml`](./manifest.yml) and
+reinstall the app** (OAuth & Permissions → *Reinstall to Workspace*). That
+enables the parts that need new permissions:
+
+- the `channels:join` scope (auto-joining public channels),
+- the `member_joined_channel` event (the welcome message when invited),
+- the two shortcuts, and escaped `/monitor` text (so `notify @someone` can ping them).
+
+Until you reinstall, everything else keeps working: adding sites in public
+channels still works through `chat:write.public`.
 
 ---
 
@@ -239,8 +312,12 @@ Slack IDs (e.g. `ALLOWED_USER_IDS=U012ABC,U034DEF`).
   mismatch described at the top. Check your Kuma version and try a fallback
   (git-install the library, or run a REST bridge). Also re-check
   `KUMA_USERNAME` / `KUMA_PASSWORD` and `KUMA_MFA_SECRET` if 2FA is on.
-- **Bot doesn't respond in a channel** — make sure it's invited
-  (`/invite @UptimeBot`) and that you actually @mentioned it.
+- **Bot doesn't respond in a channel** — use `/monitor …`, which works
+  everywhere. For `@UptimeBot …`, make sure it's invited (`/invite @UptimeBot`).
+- **"I'm not in that channel"** — it's a private channel; `/invite @UptimeBot`
+  there, then run the command again.
+- **No welcome message / shortcuts missing / `notify @someone` doesn't work** —
+  re-apply the manifest and reinstall (see [Upgrading](#upgrading)).
 - **DMs do nothing** — confirm the app was (re)installed after applying the
   manifest, so the `message.im` event and `im:*` scopes are active.
 - **`not_authed` / `invalid_auth`** — the tokens are wrong or swapped.
@@ -278,8 +355,11 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Tests cover URL/type parsing, the database (duplicate detection, owner scoping),
-and command routing — no Slack or Kuma connection required.
+Tests cover URL/type parsing, the database (duplicate detection, owner scoping,
+upgrades), command routing, adding from every kind of conversation, the add form,
+shortcuts, button permissions, and the full outage lifecycle (alert, fallback,
+threaded recovery, expiry) — using in-memory fakes, so no Slack or Kuma
+connection is required.
 
 ## Security notes
 
@@ -300,6 +380,8 @@ and command routing — no Slack or Kuma connection required.
   you don't have to run `remove` yourself.
 - Status alerting is poll-based (default every 120s), so notifications can lag a
   live outage by up to that interval.
+- Each channel that adds the same URL gets its own Kuma monitor, so the same
+  site is checked once per owner.
 
 ---
 
@@ -308,11 +390,13 @@ and command routing — no Slack or Kuma connection required.
 ```
 app.py            entry point: init DB, register handlers, start scheduler, run
 config.py         loads settings from environment / .env
-slack_app.py      Slack commands, the add-site modal, and buttons
-scheduler.py      status-change alerts + client-site expiry jobs
-database.py       SQLite storage (site type, expiry, owning channel)
+slack_app.py      Slack commands, the add form, shortcuts, welcome, and buttons
+scheduler.py      outage alerts, client-site expiry, and reconcile jobs
+database.py       SQLite storage (sites, outages, per-channel settings)
 kuma_client.py    the single place that talks to Uptime Kuma  ← swap for v2/REST
 utils.py          small shared helpers (URL cleanup, formatting)
+reset.py          wipe all tracked sites (dry run unless --yes)
+tests/            pytest suite with in-memory Slack/Kuma fakes
 manifest.yml      Slack app manifest
 Dockerfile / docker-compose.yml
 .env.example      copy to .env and fill in

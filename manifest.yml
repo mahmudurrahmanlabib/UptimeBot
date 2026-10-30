@@ -1,6 +1,6 @@
 display_information:
   name: UptimeBot
-  description: Add, track, and auto-clean up Uptime Kuma website monitors right from Slack.
+  description: Watch websites from any Slack channel — instant down/up alerts, powered by Uptime Kuma.
   background_color: "#1f2d3d"
 
 features:
@@ -11,34 +11,45 @@ features:
   bot_user:
     display_name: UptimeBot
     always_online: true
+  shortcuts:
+    - name: Monitor a website
+      type: global
+      callback_id: add_site_shortcut
+      description: Watch a site and choose the channel for its alerts
+    - name: Monitor this link
+      type: message
+      callback_id: monitor_link_shortcut
+      description: Watch the link in this message for downtime
   slash_commands:
     - command: /monitor
-      description: Add a site to monitor (e.g. /monitor example.com), or run a command
-      usage_hint: example.com
-      should_escape: false
+      description: Watch a site from this channel, or list / status / remove / notify / help
+      usage_hint: example.com  ·  list  ·  notify @here  ·  help
+      should_escape: true   # sends @people/@groups as IDs so `notify` can ping them
 
 oauth_config:
   scopes:
     bot:
       - app_mentions:read   # see @UptimeBot mentions in channels
+      - channels:join       # join a public channel by itself when a site is added there
+      - channels:read       # check channel membership (welcome message, personal Home tab)
       - chat:write          # post messages
-      - chat:write.public   # post in public channels without being invited
-      - commands            # the /uptime slash command
+      - chat:write.public   # post in public channels even before being invited
+      - commands            # the /monitor slash command and the shortcuts
+      - groups:read         # same as channels:read, for private channels
       - im:history          # read DMs sent to the bot
       - im:read             # detect DM channels
       - im:write            # open/post DMs
       - users:read          # resolve display names for nicer messages
-      - channels:read       # check public-channel membership for the per-user Home tab
-      - groups:read         # same, for private channels
 
 settings:
   event_subscriptions:
     bot_events:
       - app_home_opened
       - app_mention
+      - member_joined_channel   # say hello (with an Add button) when invited to a channel
       - message.im
   interactivity:
-    is_enabled: true        # required for the Add-a-site modal and buttons
+    is_enabled: true        # required for the Add-a-site form, shortcuts, and buttons
   socket_mode_enabled: true
   org_deploy_enabled: false
   token_rotation_enabled: false

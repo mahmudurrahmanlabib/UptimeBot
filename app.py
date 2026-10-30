@@ -7,6 +7,7 @@ import logging
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 
 import config
 import database as db
@@ -25,6 +26,9 @@ def main():
     log.info("database ready at %s", config.DB_PATH)
 
     app = App(token=config.SLACK_BOT_TOKEN)
+    # Many sites failing at once can hit Slack's rate limits; wait and retry
+    # rather than drop an alert.
+    app.client.retry_handlers.append(RateLimitErrorRetryHandler(max_retry_count=2))
     slack_app.register(app)
 
     sched = scheduler.start(app.client)
